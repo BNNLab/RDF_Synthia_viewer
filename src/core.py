@@ -1,13 +1,9 @@
 # src/core.py
 
-import base64
-import io
 import re
 from typing import List, Dict, Optional
 
 from rdkit.Chem import rdChemReactions
-from rdkit.Chem import Draw  # needed for fallback PNG drawing
-
 
 # -----------------------------
 # Helper: Extract $DTYPE values
@@ -31,115 +27,83 @@ def _extract_rxn_block(entry: str) -> Optional[str]:
 
 
 # --------------------------------------------------------
-# Robust drawer detection (DOES NOT IMPORT rdMolDraw2D)
+# SVG drawer detection (NO import of rdkit.Chem.Draw)
 # --------------------------------------------------------
 def _get_svg_drawer(width: int, height: int):
     """
-    Try all known places RDKit may expose MolDraw2DSVG.
-    We avoid importing from rdkit.Chem.Draw to stay Streamlit-safe.
+    Try to obtain MolDraw2DSVG from rdkit.Chem.rdMolDraw2D only.
+    Do NOT import rdkit.Chem.Draw to avoid failures on some builds.
     """
-    # Option A: rdMolDraw2D available directly under rdkit.Chem
     try:
-        from rdkit.Chem import rdMolDraw2D
+        from rdkit.Chem import rdMolDraw2D  # safe path if present
         return rdMolDraw2D.MolDraw2DSVG(width, height)
     except Exception:
-        pass
-
-    # Option B: rdMolDraw2D under rdkit.Chem.Draw (some older conda builds)
-    try:
-        import rdkit.Chem.Draw.rdMolDraw2D as alt
-        return alt.MolDraw2DSVG(width, height)
-    except Exception:
-        pass
-
-    # Option C: MolDraw2DSVG exposed directly on Draw module
-    try:
-        if hasattr(Draw, "MolDraw2DSVG"):
-            return Draw.MolDraw2DSVG(width, height)
-    except Exception:
-        pass
-
-    return None  # drawer not available → trigger PNG fallback
+        return None  # drawer not available in this RDKit build
 
 
 # --------------------------------------------------------
-# PNG → SVG wrapper (so the app still accepts SVG strings)
-# --------------------------------------------------------
-def _png_to_svg(pil_img, width: int, height: int) -> str:
-    buf = io.BytesIO()
-    pil_img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">'
-        f'<image href="data:image/png;base64,{b64}" '
-        f'width="{width}" height="{height}" />'
-        f'</svg>'
-    )
-
-
-# --------------------------------------------------------
-# RXN block → SVG
+# RXN block → SVG (preferred path)
 # --------------------------------------------------------
 def reaction_rxnblock_to_svg(
     rxn_block: str,
     width: int = 600,
     height: int = 280,
 ) -> Optional[str]:
-
+    """
+    Create an SVG string for a reaction given a full RXN block.
+    Uses rdMolDraw2D if available; otherwise returns None.
+    """
     try:
         rxn = rdChemReactions.ReactionFromRxnBlock(rxn_block)
         if rxn is None:
             return None
 
         drawer = _get_svg_drawer(width, height)
-        if drawer:
-            drawer.DrawReaction(rxn)
-            drawer.FinishDrawing()
-            return drawer.GetDrawingText()
+        if drawer is None:
+            return None  # cannot draw in this environment
 
-        # PNG fallback for environments without SVG drawer
-        pil = Draw.ReactionToImage(rxn, subImgSize=(width, height))
-        return _png_to_svg(pil, width, height)
-
+        drawer.DrawReaction(rxn)
+        drawer.FinishDrawing()
+        return drawer.GetDrawingText()
     except Exception:
         return None
 
 
 # --------------------------------------------------------
-# SMILES → SVG (fallback only)
+# SMILES → SVG (fallback only, using same drawer)
 # --------------------------------------------------------
 def reaction_smiles_to_svg(
     smiles: str,
     width: int = 600,
     height: int = 280,
 ) -> Optional[str]:
-
+    """
+    Create an SVG string for a reaction given reaction SMILES.
+    Uses rdMolDraw2D if available; otherwise returns None.
+    """
     try:
         rxn = rdChemReactions.ReactionFromSmarts(smiles, useSmiles=True)
         if rxn is None:
             return None
 
         drawer = _get_svg_drawer(width, height)
-        if drawer:
-            drawer.DrawReaction(rxn)
-            drawer.FinishDrawing()
-            return drawer.GetDrawingText()
+        if drawer is None:
+            return None  # cannot draw in this environment
 
-        pil = Draw.ReactionToImage(rxn, subImgSize=(width, height))
-        return _png_to_svg(pil, width, height)
-
+        drawer.DrawReaction(rxn)
+        drawer.FinishDrawing()
+        return drawer.GetDrawingText()
     except Exception:
         return None
 
 
 # --------------------------------------------------------
-# Main RDF parser (unchanged logic)
+# Main RDF parser (unchanged interface)
 # --------------------------------------------------------
 def parse_rdf_reactions(rdf_text: str) -> List[Dict[str, Optional[str]]]:
 
     entries = rdf_text.split("$RFMT")
-    results = []
+    results: List[Dict[str, Optional[str]]] = []
 
     for entry in entries:
 
@@ -150,12 +114,14 @@ def parse_rdf_reactions(rdf_text: str) -> List[Dict[str, Optional[str]]]:
         conditions = _extract_dtype(entry, "Reaction Conditions")
         reaction_class = _extract_dtype(entry, "Name")
 
-        svg = None
+        svg: Optional[str] = None
 
+        # Prefer RXN block rendering
         rxn_block = _extract_rxn_block(entry)
         if rxn_block:
             svg = reaction_rxnblock_to_svg(rxn_block)
 
+        # Fallback to SMILES if RXN fails
         if svg is None and smiles:
             svg = reaction_smiles_to_svg(smiles)
 
