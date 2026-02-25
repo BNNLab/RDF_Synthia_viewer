@@ -1,1 +1,1 @@
-libXrender1
+libx11-dev
